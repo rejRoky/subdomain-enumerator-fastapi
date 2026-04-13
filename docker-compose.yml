@@ -135,7 +135,9 @@ services:
     image: mher/flower:2.0
     container_name: subdomain-flower
     restart: unless-stopped
-    command: ["celery", "flower", "--broker=redis://redis:6379/0", "--port=5555"]
+    command: ["celery", "--broker=redis://redis:6379/0", "flower", "--port=5555"]
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
     ports:
       - "${FLOWER_PORT:-5555}:5555"
     depends_on:
