@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from typing import Optional
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .jobs import create_job, delete_job, get_job, list_jobs, purge_expired_jobs, run_enumeration
-from .models import EnumerateRequest, JobListResponse, JobResponse
+from .db import engine
+from .jobs import create_job, delete_job, get_job, list_jobs
+from .models import EnumerateRequest, JobListResponse, JobResponse, JobStatus
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -26,22 +27,12 @@ logger = logging.getLogger(__name__)
 # ─── Lifespan ─────────────────────────────────────────────────────────────────
 
 
-async def _cleanup_loop() -> None:
-    """Periodically purge expired jobs from the in-memory store."""
-    while True:
-        await asyncio.sleep(300)  # run every 5 minutes
-        await purge_expired_jobs()
-
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("Starting %s", settings.app_name)
-    task = asyncio.create_task(_cleanup_loop())
-    try:
-        yield
-    finally:
-        task.cancel()
-        logger.info("Shutdown complete")
+    yield
+    await engine.dispose()
+    logger.info("Shutdown complete")
 
 
 # ─── App ──────────────────────────────────────────────────────────────────────
@@ -51,8 +42,8 @@ app = FastAPI(
     version=settings.api_version,
     description=(
         "Passive subdomain enumeration API.\n\n"
-        "**Flow**: `POST /api/v1/enumerate` → receive `job_id` → poll "
-        "`GET /api/v1/jobs/{job_id}` until `status` is `completed` or `failed`."
+        "**Flow**: `POST /api/v1/enumerate` → receive `job_id` → "
+        "poll `GET /api/v1/jobs/{job_id}` until `status` is `completed` or `failed`."
     ),
     docs_url="/docs",
     redoc_url="/redoc",
@@ -111,11 +102,7 @@ async def health():
 
 @app.get("/", tags=["System"], summary="API info")
 async def root():
-    return {
-        "name": settings.app_name,
-        "version": settings.api_version,
-        "docs": "/docs",
-    }
+    return {"name": settings.app_name, "version": settings.api_version, "docs": "/docs"}
 
 
 @app.post(
@@ -129,31 +116,33 @@ async def root():
         422: {"description": "Invalid domain"},
     },
 )
-async def start_enumeration(body: EnumerateRequest, background_tasks: BackgroundTasks):
-    job_id = await create_job(body.domain)
-    background_tasks.add_task(
-        run_enumeration,
-        job_id=job_id,
+async def start_enumeration(body: EnumerateRequest):
+    job = await create_job(
         domain=body.domain,
         vt_api_key=body.vt_api_key or "",
         do_resolve=body.resolve_dns,
     )
-    logger.info(
-        "Accepted job %s for domain %s (resolve_dns=%s)",
-        job_id, body.domain, body.resolve_dns,
-    )
-    return await get_job(job_id)
+    logger.info("Accepted job %s for domain %s", job.job_id, body.domain)
+    return job
 
 
 @app.get(
     f"{API}/jobs",
     response_model=JobListResponse,
     tags=["Jobs"],
-    summary="List all jobs (newest first)",
+    summary="List jobs (newest first, paginated)",
 )
-async def list_all_jobs():
-    jobs = await list_jobs()
-    return JobListResponse(jobs=jobs, total=len(jobs))
+async def list_all_jobs(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    status: Optional[JobStatus] = Query(None),
+):
+    jobs, total = await list_jobs(
+        limit=limit,
+        offset=offset,
+        status=status.value if status else None,
+    )
+    return JobListResponse(jobs=jobs, total=total)
 
 
 @app.get(

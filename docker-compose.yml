@@ -1,33 +1,151 @@
 services:
+
+  # ── API ─────────────────────────────────────────────────────────────────────
   api:
     build:
       context: .
       dockerfile: Dockerfile
-      target: runtime
     image: subdomain-enumerator:latest
     container_name: subdomain-api
     restart: unless-stopped
+    command: ["sh", "entrypoint.sh"]   # runs migrations then starts uvicorn
     ports:
       - "${PORT:-8000}:8000"
     environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-subdomain_enumerator}
+      REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       VT_API_KEY: ${VT_API_KEY:-}
-      MAX_JOBS: ${MAX_JOBS:-100}
-      JOB_TTL_SECONDS: ${JOB_TTL_SECONDS:-3600}
+      JOB_TTL_SECONDS: ${JOB_TTL_SECONDS:-86400}
       CORS_ORIGINS: ${CORS_ORIGINS:-["*"]}
       DEBUG: ${DEBUG:-false}
     env_file:
       - path: .env
-        required: false   # optional — works fine without it
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 5s
-      start_period: 15s
+      start_period: 30s
       retries: 3
     networks:
       - subdomain-net
+
+  # ── Celery worker ────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: subdomain-enumerator:latest
+    container_name: subdomain-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.celery_app", "worker",
+              "--loglevel=info", "--concurrency=4", "-Q", "celery"]
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-subdomain_enumerator}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      VT_API_KEY: ${VT_API_KEY:-}
+      JOB_TTL_SECONDS: ${JOB_TTL_SECONDS:-86400}
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - subdomain-net
+
+  # ── Celery Beat (scheduler) ──────────────────────────────────────────────────
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: subdomain-enumerator:latest
+    container_name: subdomain-beat
+    restart: unless-stopped
+    command: ["celery", "-A", "app.celery_app", "beat", "--loglevel=info", "-s", "/tmp/celerybeat-schedule"]
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-subdomain_enumerator}
+      REDIS_URL: redis://redis:6379/0
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      - redis
+    networks:
+      - subdomain-net
+
+  # ── Flower (Celery monitoring UI) ─────────────────────────────────────────────
+  flower:
+    image: mher/flower:2.0
+    container_name: subdomain-flower
+    restart: unless-stopped
+    command: ["celery", "flower", "--broker=redis://redis:6379/0", "--port=5555"]
+    ports:
+      - "${FLOWER_PORT:-5555}:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - subdomain-net
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: subdomain-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-subdomain_enumerator}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-subdomain_enumerator}"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    networks:
+      - subdomain-net
+
+  # ── Redis ──────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: subdomain-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 5
+    networks:
+      - subdomain-net
+
+volumes:
+  postgres_data:
+  redis_data:
 
 networks:
   subdomain-net:

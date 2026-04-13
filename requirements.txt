@@ -1,5 +1,20 @@
+# Web
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
-httpx>=0.27.0
 pydantic>=2.9.0
 pydantic-settings>=2.6.0
+
+# HTTP client
+httpx>=0.27.0
+
+# Database
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.29.0
+alembic>=1.13.0
+
+# Task queue
+celery>=5.4.0
+redis>=5.0.0
+
+# Celery monitoring (Flower runs as its own container — listed here for local use)
+flower>=2.0.0
