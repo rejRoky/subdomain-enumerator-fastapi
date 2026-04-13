@@ -193,4 +193,4 @@ All settings are controlled via environment variables (or `.env`):
 
 ## License
 
-MIT
+This project is licensed under the [MIT License](LICENSE).
